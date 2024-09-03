@@ -1,0 +1,618 @@
+#--------------------------Waveform Database Libraries----------------------------------------------------------
+
+import pandas as pd
+import scipy.io
+import os
+import wfdb
+import random
+
+#---------------------------CNN Libraries---------------------------------------------------------
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import confusion_matrix, precision_score, recall_score, f1_score, accuracy_score, roc_auc_score, average_precision_score
+from torch.utils.data import DataLoader, TensorDataset, random_split
+import time
+from torch.optim import Adam
+
+#---------------------------Quantum Libraries---------------------------------------------------------
+
+import pennylane as qml
+from sklearn.preprocessing import normalize
+from sklearn.preprocessing import StandardScaler
+from pennylane.templates.embeddings import AngleEmbedding, AmplitudeEmbedding, BasisEmbedding, SqueezingEmbedding, DisplacementEmbedding, IQPEmbedding
+from math import ceil
+import pickle
+import traceback
+
+#---------------------------Hyper-parameter Tuniung Libraries---------------------------------------------------------
+
+from skopt import gp_minimize
+from skopt.space import Real, Integer
+from skopt.utils import use_named_args
+
+#---------------------------PreProcessing Libraries---------------------------------------------------------
+
+from scipy.fft import fft, fftshift
+from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
+from sklearn.metrics import log_loss
+from sklearn.preprocessing import normalize
+from sklearn.manifold import SpectralEmbedding
+from lpproj import LocalityPreservingProjection 
+
+
+#---------------------------Load Database---------------------------------------------------------
+
+dataFrame = pd.read_csv('/Users/mateo/combined_ECG_Data.csv')
+
+# Verify the combined DataFrame
+print(f"Combined and randomized DataFrame shape: {dataFrame.shape}")
+
+#---------------------------------Designating Training and Testing Sets---------------------------------------------------
+
+# --- Dataset: Previously sectioned ECG recordings into 2-second (360 Hz) windows ---
+
+sub_timewindow = 960
+
+x, y = dataFrame.iloc[:, 0:sub_timewindow].values, dataFrame['label'].values
+
+print('x-shape: ')
+print(x.shape)
+print('y-shape: ')
+print(y.shape)
+
+
+
+#--------------------------------- Defining PreProcessing Techniques that Reduce Dimensionality of Data ---------------------------------------------------
+
+# defines classical data preprocessing techniques
+def pca(x, c):
+    pca = PCA(n_components=c)
+    x = pca.fit_transform(x)
+    return x
+
+def autoencoder(x, c, verbose=False):
+    class Autoencoder(nn.Module):
+        def __init__(self, input_dim, encoding_dim):
+            super(Autoencoder, self).__init__()
+
+            # Encoding layer
+            self.encoder = nn.Linear(input_dim, encoding_dim)
+
+            # Decoding layer
+            self.decoder = nn.Linear(encoding_dim, input_dim)
+
+        def forward(self, x):
+            x = torch.relu(self.encoder(x))
+            x = torch.sigmoid(self.decoder(x))
+            return x
+
+    input_dim = x.shape[1]  # Number of features in the input
+
+    # Create the model
+    model = Autoencoder(input_dim, c)
+
+    # Loss function
+    criterion = nn.MSELoss()
+
+    # Optimizer
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
+
+    # Number of epochs
+    num_epochs = 1000
+
+    # Train the model
+    x = torch.from_numpy(x).float()
+    for epoch in range(num_epochs):
+        # Forward pass
+        outputs = model(x)
+        loss = criterion(outputs, x)
+
+        # Backward pass and optimization
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        if (epoch + 1) % 10 == 0:
+            print(f'Epoch:{epoch + 1}, Loss:{loss.item()}')
+
+    # Use the encoder to produce the encoded array
+    encoded_x = model.encoder(x).data
+
+    return encoded_x
+
+def undersampling(x, c):
+    indices = np.linspace(0, x.shape[1]-1, c).astype(int)
+    x_undersampled = x[:, indices]
+    
+    assert x_undersampled.shape == (x.shape[0], c), x_undersampled.shape
+
+    return x_undersampled
+
+def laplacian_eigenmaps(x, c):
+    embedding = SpectralEmbedding(n_components=c)
+    x = embedding.fit_transform(x)
+    return x
+
+def locality_preserving_projections(x, c):
+    embedding = LocalityPreservingProjection(n_components=c)
+    x = embedding.fit_transform(x)
+    return x
+
+def compressive_sensing_fft(x, c):
+    x_fft = fftshift(fft(x)) # compute the centered Fourier transform
+    Xr = (10/8) * x_fft * np.random.permutation(np.repeat([0,0,1,1,1,1,1,1,1,1], x.shape[1]/10) ) # 10/8 is the scaling factor to make sure the amplitude is preserved
+    Xr_no_zeros = [row[row.nonzero()] for row in Xr]
+    Xr_2d = np.vstack(Xr_no_zeros)
+    return Xr_2d
+
+def compressive_sensing(x, c):
+    phi = np.random.randn(256, 320)
+    y = np.dot(phi, x.T)
+    return y.T
+
+#--------------------------------- Define Encoding Methods ---------------------------------------------------
+
+def FRQI(datapoints, wires):
+    for wire in wires[:-1]:
+        qml.Hadamard(wires=wire)
+    controls = [i for i in range(len(wires) - 1)] # num_qubits-1
+
+    for pos in range(len(datapoints)):
+        bin = format(pos, '08b')
+        clist = []
+        for i in bin:
+            clist.append(int(i))
+        # set up the x's corresponding to the clist
+        for i in range(len(clist)):
+            if clist[i] == 0:
+                qml.PauliX(controls[i])
+
+        # apply the controlled phase gate
+        qml.ctrl(qml.RY(phi=2*datapoints[pos], wires=wires[-1]), control=controls)
+
+        # undo the x's
+        for i in range(len(clist)):
+            if clist[i] == 0:
+                qml.PauliX(controls[i])
+
+
+#--------------------------------- Defining Convolutional Layer Architectures ---------------------------------------------------
+
+def conv1(params, wires):
+    qml.RZ(-np.pi/2, wires=wires[1])
+    qml.CNOT(wires=[wires[1], wires[0]])
+    qml.RZ(params[0], wires=wires[0])
+    qml.RY(params[1], wires=wires[1])
+    qml.CNOT(wires=[wires[0], wires[1]])
+    qml.RY(params[2], wires=wires[1])
+    qml.CNOT(wires=[wires[1], wires[0]])
+    qml.RZ(np.pi/2, wires=wires[0])
+
+def conv2(params, wires):
+    qml.RX(params[0], wires=wires[0])
+    qml.RY(params[1], wires=wires[0])
+    qml.RZ(params[2], wires=wires[0])
+    qml.RX(params[3], wires=wires[1])
+    qml.RY(params[4], wires=wires[1])
+    qml.RZ(params[5], wires=wires[1])
+    qml.IsingZZ(params[6], wires=[wires[0], wires[1]])
+    qml.IsingYY(params[7], wires=[wires[0], wires[1]])
+    qml.IsingXX(params[8], wires=[wires[0], wires[1]])
+    qml.RX(params[9], wires=wires[0])
+    qml.RY(params[10], wires=wires[0])
+    qml.RZ(params[11], wires=wires[0])
+    qml.RX(params[12], wires=wires[1])
+    qml.RY(params[13], wires=wires[1])
+    qml.RZ(params[14], wires=wires[1])
+
+def conv3(params, wires):
+    qml.RY(params[0], wires=wires[0])
+    qml.RY(params[1], wires=wires[1])
+    qml.CNOT(wires=[wires[0], wires[1]])
+
+def conv4(params, wires):
+    qml.Hadamard(wires=wires[0])
+    qml.Hadamard(wires=wires[1])
+    qml.CZ(wires=[wires[0], wires[1]])
+    qml.RX(params[0], wires=wires[0])
+    qml.RX(params[1], wires=wires[1])
+
+def conv5(params, wires):
+    qml.RY(params[0], wires=wires[0])
+    qml.RY(params[1], wires=wires[1])
+    qml.CNOT(wires=[wires[1], wires[0]])
+    qml.RY(params[2], wires=wires[0])
+    qml.RY(params[3], wires=wires[1])
+    qml.CNOT(wires=[wires[0], wires[1]])
+
+def conv6(params, wires):
+    qml.RY(params[0], wires=wires[0])
+    qml.RY(params[1], wires=wires[1])
+    qml.CRZ(params[2], wires=[wires[1], wires[0]])
+    qml.RY(params[3], wires=wires[0])
+    qml.RY(params[4], wires=wires[1])
+    qml.CRZ(params[5], wires=[wires[0], wires[1]])
+
+def conv7(params, wires):
+    qml.RY(params[0], wires=wires[0])
+    qml.RY(params[1], wires=wires[1])
+    qml.CRX(params[2], wires=[wires[1], wires[0]])
+    qml.RY(params[3], wires=wires[0])
+    qml.RY(params[4], wires=wires[1])
+    qml.CRX(params[5], wires=[wires[0], wires[1]])
+
+def conv8(params, wires):
+    qml.RY(params[0], wires=wires[0])
+    qml.RY(params[1], wires=wires[1])
+    qml.CNOT(wires=[wires[0], wires[1]])
+    qml.RY(params[2], wires=wires[0])
+    qml.RY(params[3], wires=wires[1])
+    qml.CNOT(wires=[wires[0], wires[1]])
+    qml.RY(params[4], wires=wires[0])
+    qml.RY(params[5], wires=wires[1])
+
+def conv9(params, wires):
+    qml.RX(params[0], wires=wires[0])
+    qml.RX(params[1], wires=wires[1])
+    qml.RZ(params[2], wires=wires[0])
+    qml.RZ(params[3], wires=wires[1])
+    qml.CRZ(params[4], wires=[wires[1], wires[0]])
+    qml.CRZ(params[5], wires=[wires[0], wires[1]])
+    qml.RX(params[6], wires=wires[0])
+    qml.RX(params[7], wires=wires[1])
+    qml.RZ(params[8], wires=wires[0])
+    qml.RZ(params[9], wires=wires[1])
+
+def conv10(params, wires):
+    qml.RX(params[0], wires=wires[0])
+    qml.RX(params[1], wires=wires[1])
+    qml.RZ(params[2], wires=wires[0])
+    qml.RZ(params[3], wires=wires[1])
+    qml.CRX(params[4], wires=[wires[1], wires[0]])
+    qml.CRX(params[5], wires=[wires[0], wires[1]])
+    qml.RX(params[6], wires=wires[0])
+    qml.RX(params[7], wires=wires[1])
+    qml.RZ(params[8], wires=wires[0])
+    qml.RZ(params[9], wires=wires[1])
+
+def conv11(params, wires):
+    qml.U3(params[0], params[1], params[2], wires=wires[0])
+    qml.U3(params[3], params[4], params[5], wires=wires[1])
+    qml.CNOT(wires=[wires[0], wires[1]])
+    qml.RY(params[6], wires=wires[0])
+    qml.RZ(params[7], wires=wires[1])
+    qml.CNOT(wires=[wires[1], wires[0]])
+    qml.RY(params[8], wires=wires[0])
+    qml.CNOT(wires=[wires[0], wires[1]])
+    qml.U3(params[9], params[10], params[11], wires=wires[0])
+    qml.U3(params[12], params[13], params[14], wires=wires[1])
+
+#--------------------------------- Defining Pooling Layer Architectures ---------------------------------------------------
+
+# taken from https://qiskit.org/ecosystem/machine-learning/tutorials/11_quantum_convolutional_neural_networks.html
+def pool1(params, wires):
+    qml.RZ(-np.pi/2, wires=wires[1])
+    qml.CNOT(wires=[wires[1], wires[0]])
+    qml.RZ(params[0], wires=wires[0])
+    qml.RY(params[1], wires=wires[1])
+    qml.CNOT(wires=[wires[0], wires[1]])
+    qml.RY(params[2], wires=wires[1])
+
+# taken from https://www.tensorflow.org/quantum/tutorials/qcnn
+def pool2(params, wires):
+    qml.RX(params[0], wires=wires[1])
+    qml.RY(params[1], wires=wires[1])
+    qml.RZ(params[2], wires=wires[1])
+    qml.RX(params[3], wires=wires[0])
+    qml.RY(params[4], wires=wires[0])
+    qml.RZ(params[5], wires=wires[0])
+    qml.CNOT(wires=[wires[0], wires[1]])
+    qml.RZ(-params[6], wires=wires[1])
+    qml.RY(-params[7], wires=wires[1])
+    qml.RX(-params[8], wires=wires[1])
+
+# taken from https://arxiv.org/abs/2108.00661
+def pool3(params, wires):
+    qml.CRZ(params[0], wires=[wires[0], wires[1]])
+    qml.PauliX(wires=wires[0])
+    qml.CRX(params[1], wires=[wires[0], wires[1]])
+
+# inspired by https://www.nature.com/articles/s41567-019-0648-8
+def pool4(params, wires):
+    measurement = qml.measure(wires=wires[0])
+    qml.cond(measurement==0, qml.RZ)(params[0], wires=wires[1])
+
+
+#--------------------------------- Choose PreProcessing Techniques ---------------------------------------------------
+
+selection = input('Please select the classical data preprocessing technique: \n 1. PCA \n 2. Autoencoder \n 3. Undersampling \n 4. Laplacian Eigenmaps \n 5. Locality Preserving Projections \n 6. Compressive sensing with FFT \n 7. Compressive sensing \n Selection is: ')
+if selection == '1':
+    c = int(input('Please enter the number of components (NOTE: to use amplitude encoding in the next step you must choose  a positive power of 2): '))
+    x = pca(x, c)
+elif selection == '2':
+    c = int(input('Please enter the number of components (NOTE: to use amplitude encoding in the next step you must choose  a positive power of 2): '))
+    x = autoencoder(x, c)
+elif selection == '3':
+    c = int(input('Please enter the number of components (NOTE: to use amplitude encoding in the next step you must choose  a positive power of 2): '))
+    x = undersampling(x, c)
+elif selection == '4':
+    c = int(input('Please enter the number of components (NOTE: to use amplitude encoding in the next step you must choose  a positive power of 2): '))
+    x = laplacian_eigenmaps(x, c)
+elif selection == '5':
+    c = int(input('Please enter the number of components (NOTE: to use amplitude encoding in the next step you must choose  a positive power of 2): '))
+    x = locality_preserving_projections(x, c)
+elif selection == '6':
+    c = int(input('Please enter the number of components (NOTE: to use amplitude encoding in the next step you must choose  a positive power of 2): '))
+    x = compressive_sensing_fft(x, c)
+elif selection == '7':
+    c = int(input('Please enter the number of components (NOTE: to use amplitude encoding in the next step you must choose  a positive power of 2): '))
+    x = compressive_sensing(x, c)
+print(x.shape)
+
+#--------------------------------- Choose Encoding Method ---------------------------------------------------
+
+selection = input('Please select the quantum feature map: \n 1. Angle Embedding \n 2. Amplitude Embedding \n 3. FRQI \n Selection is: ')
+if selection == '1':
+    n_qubits = x.shape[1]
+    embedding = AngleEmbedding
+elif selection == '2':
+    n_qubits = int(np.log2(x.shape[1]))
+    x = normalize(x)
+    embedding = AmplitudeEmbedding
+elif selection == '3':
+    n_qubits = 9
+    x = normalize(x)
+    embedding = FRQI
+
+# train test split
+split = 0.8*x.shape[0]
+train_x, train_y = x[:int(split), :], y[:int(split)]
+test_x, test_y = x[int(split):, :], y[int(split):]
+
+#--------------------------------- Choosing Convolutional Layer Architectures ---------------------------------------------------
+
+params_per_conv_layer_map = {
+    1: 3,
+    2: 15,
+    3: 2,
+    4: 2,
+    5: 4,
+    6: 6,
+    7: 6,
+    8: 6,
+    9: 10,
+    10: 10,
+    11: 15
+}
+conv_selection = input("Select the convolutional layer you want to use (1-11): ")
+conv = globals()[f"conv{conv_selection}"]
+params_per_conv = params_per_conv_layer_map[int(conv_selection)]
+print(params_per_conv)
+
+#--------------------------------- Choosing Pooling Layer Architectures ---------------------------------------------------
+
+params_per_pool_layer_map = {
+    1: 3,
+    2: 9,
+    3: 2,
+    4: 1
+}
+pooling_selection = input("Select the pooling layer you want to use (1-4): ")
+pool = globals()[f"pool{pooling_selection}"]
+params_per_pool = params_per_pool_layer_map[int(pooling_selection)]
+
+#--------------------------------- Construct QCNN ---------------------------------------------------
+
+# set up the quantum device
+dev = qml.device('default.qubit', wires = n_qubits)
+
+#Applies standard pooling operation between pairs of qubits
+def pooling_layer(sources, sinks, params):
+    param_index = 0
+    for source, sink in zip(sources, sinks):
+        pool(params[param_index:param_index+params_per_pool], wires=[source, sink])
+        param_index += params_per_pool
+
+inv_mapping = {
+    1:4,
+    2:2,
+    4:1,
+}
+
+#Applies alternative pooling layer which applies a conditional rotaion. 
+def pooling_layer_other(sources, sinks, params):
+    measurements = [np.nan for i in range(8)]
+    for i in sources:
+        measurements[i] = qml.measure(wires=i)
+    print(f"sources: {sources} | sinks: {sinks} | measurements: {measurements}")
+    if len(sources) > 1:
+        for count, j in enumerate(sinks):
+            qml.cond(measurements[j-inv_mapping[len(sources)]] == 1, qml.RZ)(params[count], wires=j)
+            qml.cond(measurements[j+inv_mapping[len(sources)]] == 1, qml.RZ)(params[count], wires=j)
+    else:
+        qml.cond(measurements[4] == 1, qml.RZ)(params[0], wires=sinks[0])
+
+def conv_layer(wires, params, convs_per_layer):
+    param_index = 0
+
+    for i in range(convs_per_layer):
+        for q1, q2 in zip(wires[::2], wires[1::2]):
+            conv(params[param_index:param_index+params_per_conv], wires=[q1, q2])
+            param_index += params_per_conv
+        for q1, q2 in zip(wires[1::2], wires[2::2] + [min(wires)]):
+            conv(params[param_index:param_index+params_per_conv], wires=[q1, q2])
+            param_index += params_per_conv
+
+    # # 3 skip convs
+    # if len(wires) > 2:
+    #     for q1, q2 in zip(wires[::3], wires[2::3] + [0]):
+    #         conv(params[param_index:param_index+params_per_conv], wires=[q1, q2])
+    #         param_index += params_per_conv
+
+    #     for q1, q2 in zip(wires[1::3], wires[3::3] + [1]):
+    #         conv(params[param_index:param_index+params_per_conv], wires=[q1, q2])
+    #         param_index += params_per_conv
+
+    #     for q1, q2 in zip(wires[2::3], wires[4::3]):
+    #         conv(params[param_index:param_index+params_per_conv], wires=[q1, q2])
+    #         param_index += params_per_conv
+
+convs_per_layer = int(input("Select the number of covolutions per layer you want to use (1-3): "))
+
+assert convs_per_layer in [1, 2, 3], "You must select 1, 2, or 3 convolutions per layer"
+
+#----------------------------------------------------------------------------------------------------------------------
+
+special_pooling = bool(int(input("Enter 1 if you want to use pooling_layer_other, which checks if either nearest measured neighbor qubit evaluated to 1. Otherwise enter 0. WARNING: Not compatible with FRQI due to odd number of qubits\n: ")))
+if special_pooling:
+    pooling_direction = 2
+    params_per_pool = 1
+else:
+    pooling_direction = int(input("Select the pooling direction (0 for removing top half, 1 for removing every other):"))
+    assert pooling_direction in [0, 1], "Invalid pooling direction"
+
+layers = [n_qubits] + [int(n_qubits/(2**i)) for i in range(1, int(np.log2(n_qubits))+1)]
+num_params = ceil(sum(layers)*(params_per_conv*convs_per_layer + params_per_pool/2))
+
+# list of tensors with initial values of 0.01*np.random.randn(num_params)
+param_init = [torch.tensor(np.random.rand(), requires_grad=True) for _ in range(num_params)]
+
+@qml.qnode(dev, interface='torch')
+def circuit(params, x):
+    embedding(x, wires=range(n_qubits))
+    
+    # create a list, starting with n_qubits, then floor(n_qubits/2), then floor(n_qubits/4), etc.
+    layers = [n_qubits] + [int(n_qubits/(2**i)) for i in range(1, int(np.log2(n_qubits))+1)]
+
+    param_starting_index = 0
+    if pooling_direction == 0:
+        # Shrinking towards the bottom
+        for layer_qubits in layers[:-1]:
+            conv_layer(wires=list(range(n_qubits - layer_qubits, n_qubits)), params=params[param_starting_index:param_starting_index+params_per_conv*int(layer_qubits*convs_per_layer)], convs_per_layer=convs_per_layer)
+            param_starting_index += params_per_conv*int(layer_qubits*convs_per_layer)
+            qml.Barrier()
+            pooling_layer(sources=list(range(n_qubits - layer_qubits, n_qubits - layer_qubits + int(layer_qubits/2))), sinks=list(range(n_qubits - layer_qubits + int(layer_qubits/2), n_qubits)), params=params[param_starting_index:param_starting_index+params_per_pool*int(layer_qubits/2)])
+            param_starting_index += params_per_pool*int(layer_qubits/2)
+            qml.Barrier()
+
+        return qml.expval(qml.PauliZ(n_qubits - 1))
+    else:
+        # Shrinking every other qubit
+        source_factor = 1
+        for layer_qubits in layers[:-1]:
+            conv_layer(wires=list(range(0, n_qubits, n_qubits//layer_qubits)), params=params[param_starting_index:param_starting_index+params_per_conv*int(layer_qubits*convs_per_layer)], convs_per_layer=convs_per_layer)
+            param_starting_index += params_per_conv*int(layer_qubits*convs_per_layer)
+            qml.Barrier()
+            if special_pooling:
+                pooling_layer_other(sources=list(range(source_factor, n_qubits, 2*(n_qubits//layer_qubits))), sinks=list(range(0, n_qubits, 2*(n_qubits//layer_qubits))), params=params[param_starting_index:param_starting_index+params_per_pool*int(layer_qubits/2)])
+            else:
+                pooling_layer(sources=list(range(source_factor, n_qubits, 2*(n_qubits//layer_qubits))), sinks=list(range(0, n_qubits, 2*(n_qubits//layer_qubits))), params=params[param_starting_index:param_starting_index+params_per_pool*int(layer_qubits/2)])
+            param_starting_index += params_per_pool*int(layer_qubits/2)
+            source_factor *= 2
+            qml.Barrier()
+
+        return qml.expval(qml.PauliZ(0))
+
+# print(qml.draw(circuit)(param_init, x[0]))
+with open('circuit.txt', 'w') as f:
+    try:
+        f.write(qml.draw(circuit)(param_init, x[0]))
+    except Exception as e:
+        print(str(e))
+        f.write(traceback.format_exc())
+
+#--------------------------------- Construct the MPS ---------------------------------------------------
+
+pauli_x = torch.tensor([[0, 1], [1, 0]])
+pauli_y = torch.tensor([[0, -1j], [1j, 0]])
+pauli_z = torch.tensor([[1, 0], [0, -1]])
+pauli_i = torch.tensor([[1, 0], [0, 1]])
+
+mapping = {
+    0: pauli_i,
+    1: pauli_x,
+    2: pauli_y,
+    3: pauli_z
+}
+
+def block(weights, wires):
+    weights.insert(0, torch.tensor([0.], requires_grad=False))
+    matrices = []
+    for i in range(4):
+        for j in range(4):
+            matrices.append(torch.kron(mapping[i], mapping[j])*weights[4*i+j])
+    weight_matrix = sum(matrices)*(-1j/2)
+    weight_matrix = torch.linalg.matrix_exp(weight_matrix)
+    qml.QubitUnitary(weight_matrix, wires=wires)
+
+# n_params_per_block = 15
+# n_qubits = 9
+
+# list of tensors with initial values of 0.01*np.random.randn(num_params)
+param_init = [torch.tensor(np.random.rand(), requires_grad=True) for _ in range(2*(n_qubits-1)*15)]
+
+@qml.qnode(dev, interface='torch')
+def circuit(params, x):
+    embedding(x, wires=range(n_qubits))
+    for i in range(0, n_qubits-1):
+        # print(f"{i*15}:{(i+1)*15}")
+        block(params[i*15:(i+1)*15], wires=range(i, i+2))
+    for i in range(0, n_qubits-1):
+        # print(f"{i*15}:{(i+1)*15}")
+        block(params[i*15:(i+1)*15], wires=range(i, i+2))
+    return qml.expval(qml.PauliZ(7))
+
+with open('circuit.txt', 'w') as f:
+    try:#, x[0]
+        f.write(qml.draw(circuit)(param_init, x[0]))
+    except Exception as e:
+        print(str(e))
+        f.write(traceback.format_exc())
+
+#--------------------------------- Train QCNN ---------------------------------------------------
+
+from torcheval.metrics.functional import binary_accuracy
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from tqdm import tqdm
+opt = optim.SGD(params=param_init, lr=0.001, nesterov=True, momentum=0.9)
+loss = nn.BCELoss()
+m = nn.Sigmoid()
+
+def parallel_eval(weights, x):
+    return m(circuit(weights, x))
+
+def cost(weights, X, Y):
+    if embedding == FRQI:
+        with ThreadPoolExecutor(max_workers=20) as executor:
+            futures = [executor.submit(parallel_eval, weights, x) for x in X]
+            predictions = torch.stack([future.result() for future in as_completed(futures)])
+            np_preds = [np.round(prediction.detach().numpy()) for prediction in predictions]
+            train_acc = binary_accuracy(torch.tensor(np_preds, dtype=torch.int), torch.tensor(Y, dtype=torch.int))
+            print("train_acc: {}".format(train_acc))
+    else:
+        predictions = m(circuit(weights, X))
+    return loss(predictions, torch.tensor(Y, dtype=torch.double))
+
+for i in range(3):
+    # this will take a very long time to run for FRQI
+    for iter, i in tqdm(enumerate(range(0, train_x.shape[0], 25)), total=train_x.shape[0]//25):
+        opt.zero_grad()
+        out = cost(param_init, train_x[i:i+25], train_y[i:i+25])
+        out.backward()
+        opt.step()
+
+    if embedding == FRQI:
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = [executor.submit(parallel_eval, param_init, x) for x in test_x]
+            test_preds = [np.round(future.result().detach().numpy()) for future in tqdm(as_completed(futures), total=len(futures))]
+    else:
+        test_preds = np.round(m(circuit(param_init, test_x)).detach().numpy())
+    accuracy = binary_accuracy(torch.tensor(test_preds, dtype=torch.int), torch.tensor(test_y, dtype=torch.int))
+    print("Accuracy: {:0.5f}".format(accuracy))
+
