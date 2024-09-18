@@ -1,6 +1,6 @@
 # Summary
 
-Welcome to my Git Repo that presents the undergraduate research that I did this summer. 
+Welcome to my Git Repo which presents the undergraduate research I contributed to this summer. 
 I worked alongside another undertgraduate researcher and two graduate researchers under the supervision of Dr. Yao. 
 The research was conducted at the University of Tennessee, Knoxville as part of the Quantum Algorithms & Optimization REU. 
 This was a 10 week program that took place from May 28 till August 2, 2024. 
@@ -39,6 +39,42 @@ We first wrote a program to sort the entirety of the the .hea and .mat files int
 The next step in our program is to structure the sorted data files into a database that we can feed into our CNN. 
 Once the data is extracted into a readable database with the respective classifications we split the data into training and testing sets. We then further conduct a 80/20 split for training and validation respectively.
 Finally, we optimized the hyper-parameters and fed the data into our CNN. 
+
+
+### Why use 1D CNNs and Quantum Neural Networks
+
+<strong>1D Convolutional Neural Networks</strong> are good at learning and extracting import features from the data set.
+It can scan over the ECG signal data multiple times and automatically extract data.
+Effective for identifying patterns such as Normal vs AF R to R intervals with different starting points in the data see
+
+<strong>Quantum Neural Networks</strong> are known to produce effective predictive models with excellent
+generalization performance even when provided with only a small amount of training data. Our
+goal is to apply the best quantum convolutional layers and pooling layers to yield the best test
+results. Below are different common <strong>Quantum Encoding</strong> methods we can use to transform our
+classical data to quantum bits.
+
+# Results
+### Classical
+With some guidance from my graduate student mentors my research partner and I were able to develop a 1D Convolutional Neural Network that yielded excellent results for the binary classification of the ECG data into AF and Normal classes. 
+Here are our statistical results for the classical model: <br>
+
+<strong>Accuracy: </strong> 0.9955 ± 0.0019 <br>
+<strong>Precision: </strong> 0.9971 ± 0.0016 <br>
+<strong>Recall: </strong> 0.9988 ± 0.0023 <br>
+<strong>F1 Score:</strong> 0.9969 ± 0.0011 <br>
+<strong>AUROC: </strong> 0.9998 ± 0.0001 <br>
+<strong>AUPRC: </strong> 1.000 ± 0.0000 <br>
+<br>
+### Quantum
+After several weeks of experimenting with the quantum neural network, I made decent progress. I was building on top of a former REU researcher and wrote a program to cycle through all the Quantum Neural Network configurations (adjusting preprocessing techniques, encoding methods, convolutional layer gates, and pooling gates), by doing this with the predefined gates and methods we could easily see which configurations yielded the best results.  
+
+<strong>Accuracy: </strong> 0.8437 <br>
+<strong>Precision: </strong> 0.8781 <br>
+<strong>Recall: </strong> 0.9536 <br>
+<strong>F1 Score: </strong>	0.9143 <br>
+<strong>AUROC: </strong>	0.5179 <br>
+<strong>AUPRC: </strong> 0.8779 <br>
+
 
 
 
