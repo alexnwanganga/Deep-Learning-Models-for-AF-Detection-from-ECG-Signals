@@ -1,9 +1,9 @@
 # Summary
 
 Welcome to my Git Repo which presents the undergraduate research I contributed to this summer. 
-I worked alongside another undertgraduate researcher and two graduate researchers under the supervision of Dr. Yao. 
+I worked alongside another undergraduate researcher and two graduate researchers under the supervision of Dr. Yao. 
 The research was conducted at the University of Tennessee, Knoxville as part of the Quantum Algorithms & Optimization REU. 
-This was a 10 week program that took place from May 28 till August 2, 2024. 
+This was a 10-week program that took place from May 28 to August 2, 2024. 
 I was tasked with developing quantum convolutional networks for AF (Atrial Fibrillation) detection from ECG signals. 
 This allowed me to gain experience in quantum computing and deep learning concepts as well as experience in research.
 I learned a lot at this program as well as how to work both individually on tasks I was assigned and in teams with other undergraduate and graduate researchers.
@@ -18,7 +18,7 @@ readings and a medical professional can diagnose AF by analyzing the ECG data. H
 the intermittent nature of atrial fibrillation makes it challenging to detect AF in short ECG
 readings.
 
-• Our goal is to develop a machine learning model that can accurately diagnose AF despite its
+• Our goal is to develop a machine-learning model that can accurately diagnose AF despite its
 intermittent and random symptoms
 
 • Our model also must overcome the challenge of noisy ECG signals
@@ -51,7 +51,7 @@ Effective for identifying patterns such as Normal vs AF R to R intervals with di
 generalization performance even when provided with only a small amount of training data. Our
 goal is to apply the best quantum convolutional layers and pooling layers to yield the best test
 results. Below are different common <strong>Quantum Encoding</strong> methods we can use to transform our
-classical data to quantum bits.
+classical data into quantum bits.
 
 # Results
 ### Classical
